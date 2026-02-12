@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Déficit Habitacional, Cuantitativo y Cualitativo por Ámbito</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    :root{ --bg:#ffffff; --fg:#111827; --muted:#6b7280; --card:#fafafa; --shadow:0 6px 28px rgba(0,0,0,.08); }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #wrap{max-width:1100px;margin:18px auto;padding:0 14px}
+    h1{font-weight:700;font-size:20px;margin:0 0 6px;text-align:center}
+    .sub{color:var(--muted);font-size:12px;margin:0 0 14px;text-align:center}
+    #chart{height:70vh;min-height:460px;background:var(--card);border-radius:16px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+    #chartCanvas{position:absolute;inset:0;width:100%;height:100%}
+    #loading{
+      position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      font-size:13px; color:#6b7280; z-index:5; pointer-events:none;
+      background:linear-gradient(to bottom, rgba(255,255,255,.85), rgba(255,255,255,.55));
+    }
+    #err{margin-top:10px;color:#b91c1c;font-size:12px;white-space:pre-wrap;display:none}
+
+    .seg{
+      position:absolute; top:10px; right:12px; z-index:10;
+      display:flex; gap:6px; align-items:center;
+      background:rgba(255,255,255,.90); backdrop-filter: blur(6px);
+      border:1px solid rgba(17,24,39,.10);
+      border-radius:12px; padding:5px 6px;
+      box-shadow:0 6px 18px rgba(0,0,0,.06);
+      user-select:none;
+    }
+    .seg button{
+      border:1px solid rgba(47,72,88,.25);
+      background:#fff; color:#111827;
+      border-radius:10px;
+      padding:5px 9px;
+      font-size:11px;
+      cursor:pointer;
+      transition:.15s ease;
+      line-height:1;
+    }
+    .seg button:hover{ transform: translateY(-1px); }
+    .seg button.active{ background:#2F4858; color:#fff; border-color:#2F4858; }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <h1>Déficit Habitacional, Cuantitativo y Cualitativo por Ámbito</h1>
+  <p class="sub">Fuente: ENAPRES</p>
+
+  <div id="chart">
+    <div class="seg" id="seg">
+      <button data-amb="TOTAL" class="active">TOTAL</button>
+      <button data-amb="URBANO">URBANO</button>
+      <button data-amb="RURAL">RURAL</button>
+    </div>
+    <div id="loading">Cargando datos…</div>
+    <div id="chartCanvas"></div>
+  </div>
+
+  <div id="err"></div>
+</div>
+
+<script>
+(function(){
+  const SERVICE  = "https://portalgis.vivienda.gob.pe/servergis/rest/services/OGEI/Mapa_Indicadores_Indice_DB/FeatureServer";
+  const TABLE_ID = 2;
+
+  const BASE_HEX = "#2F4858";
+  const NIVEL_NACIONAL = "NACIONAL";
+
+  const METRICS = [
+    { key:"dhp", pctLabel:"Déficit Habitacional", absKey:"dh" },
+    { key:"dcp", pctLabel:"Déficit Cuantitativo", absKey:"dc" },
+    { key:"dlp", pctLabel:"Déficit Cualitativo", absKey:"dl" }
+  ];
+
+  let ambitoSel = "TOTAL";
+  const nf1 = new Intl.NumberFormat('es-PE', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const nf0 = new Intl.NumberFormat('es-PE', { maximumFractionDigits: 0 });
+
+  function hexToHsl(hex){
+    const m=hex.replace('#','');
+    const r=parseInt(m.slice(0,2),16)/255, g=parseInt(m.slice(2,4),16)/255, b=parseInt(m.slice(4,6),16)/255;
+    const max=Math.max(r,g,b), min=Math.min(r,g,b); let h,s,l=(max+min)/2;
+    if(max===min){h=s=0;}
+    else{
+      const d=max-min; s=l>0.5? d/(2-max-min) : d/(max+min);
+      switch(max){case r:h=(g-b)/d+(g<b?6:0);break;case g:h=(b-r)/d+2;break;case b:h=(r-g)/d+4;break;}
+      h/=6;
+    }
+    return {h:Math.round(h*360), s:Math.round(s*100), l:Math.round(l*100)};
+  }
+  const baseHSL = hexToHsl(BASE_HEX);
+  const hsl = (h,s,l,a=1)=>`hsla(${h} ${s}% ${l}% / ${a})`;
+
+  const $err = document.getElementById('err');
+  const $loading = document.getElementById('loading');
+  const $seg = document.getElementById('seg');
+
+  function qs(url, params){ return url + "?" + new URLSearchParams(params).toString(); }
+  function jsonp(url, params, timeoutMs=20000){
+    return new Promise((resolve, reject)=>{
+      const cb = "__arcgis_cb_" + Math.random().toString(36).slice(2);
+      params = { ...(params||{}), callback: cb };
+      const u = qs(url, params);
+      const s = document.createElement('script');
+      let settled=false;
+      const timer = setTimeout(()=>{ if(settled) return; settled=true; cleanup(); reject(new Error("Timeout JSONP: " + u)); }, timeoutMs);
+      function cleanup(){ clearTimeout(timer); if(s.parentNode) s.parentNode.removeChild(s); try{ delete window[cb]; }catch(_){ } }
+      window[cb] = (data)=>{ if(settled) return; settled=true; cleanup(); resolve({data, url:u}); };
+      s.src = u;
+      s.onerror = ()=>{ if(settled) return; settled=true; cleanup(); reject(new Error("Error de script JSONP: " + u)); };
+      document.head.appendChild(s);
+    });
+  }
+  function resolveFieldName(layerMeta, candidates){
+    const fields = (layerMeta && layerMeta.fields) || [];
+    const wanted = candidates.map(s => String(s).toLowerCase());
+    for(const f of fields){
+      const n = (f.name||"").toLowerCase();
+      const a = (f.alias||"").toLowerCase();
+      if (wanted.includes(n) || (a && wanted.includes(a))) return f.name;
+    }
+    return null;
+  }
+
+  const chart = echarts.init(document.getElementById('chartCanvas'));
+  window.addEventListener('resize', ()=>chart.resize());
+
+  const baseOption = {
+    backgroundColor: '#ffffff',
+    grid: { left: 96, right: 40, top: 72, bottom: 110, containLabel: true },
+    legend: { top: 12, left: 'center', itemWidth: 18, itemHeight: 10, icon: 'roundRect', textStyle: { fontSize: 12 } },
+    tooltip: { trigger: 'axis' },
+    xAxis: { type:'category', boundaryGap:true, name:'Años', nameLocation:'middle', nameGap:34, axisTick:{alignWithLabel:true}, axisLabel:{margin:14}, splitLine:{show:false}, data:[] },
+    yAxis: { type:'value', name:'Porcentaje (%)', axisLabel:{ formatter:v=>nf1.format(v) + "%", margin:12 }, splitLine:{show:false}, scale:true },
+    animation: true,
+    animationDuration: 1100,
+    animationDurationUpdate: 700,
+    series: [],
+    graphic: []
+  };
+
+  const tableUrl = SERVICE + "/" + TABLE_ID;
+  let fields = {};
+  let fieldTypes = {};
+
+  function setLoading(on){ $loading.style.display = on ? 'flex' : 'none'; }
+  function showErr(e){
+    setLoading(false);
+    $err.style.display = 'block';
+    $err.textContent = "Error: " + (e && e.message ? e.message : e);
+    console.error(e);
+  }
+
+  // ===== Tooltip unificado (4 niveles)
+  function tooltipHTML(title, row){
+    // row: {dhp,dcp,dlp, dh,dc,dl} ya escalados a %
+    const lines = [`<b>${title}</b>`];
+    for(const m of METRICS){
+      const p = row[m.key];
+      const a = row[m.absKey];
+      const pctTxt = (p==null || !isFinite(p)) ? "—" : `${nf1.format(p)}%`;
+      const absTxt = (a==null || !isFinite(a)) ? "—" : nf0.format(a);
+      lines.push(`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#111827;margin-right:6px;vertical-align:middle;"></span>${m.pctLabel}: <b>${pctTxt}</b> - ${absTxt}`);
+    }
+    return lines.join('<br/>');
+  }
+
+  function inferScale(vals){
+    const v = vals.filter(x=>x!=null && isFinite(x));
+    if(!v.length) return 1;
+    const max = Math.max(...v);
+    return (max <= 1.5) ? 100 : 1;
+  }
+  function whereEquals(field, valueUpper){
+    return `UPPER(${field})=UPPER('${String(valueUpper).replace(/'/g,"''")}')`;
+  }
+  function isStringFieldByName(fieldName){
+    const t = (fieldTypes[fieldName] || "").toLowerCase();
+    return t.includes("string") || t.includes("guid");
+  }
+  function yearWhere(fieldAnio, yearValue){
+    const yStr = String(yearValue);
+    return isStringFieldByName(fieldAnio)
+      ? `${fieldAnio}='${yStr.replace(/'/g,"''")}'`
+      : `${fieldAnio}=${Number(yStr)}`;
+  }
+  function backGraphic(color, onClick){
+    const stroke = color;
+    return [{
+      type:'group', left:10, top:10, z:100, bounding:'all', cursor:'pointer', onclick:onClick,
+      children:[
+        {type:'circle', shape:{cx:18, cy:18, r:18}, style:{fill:'#fff', stroke:stroke, lineWidth:2, shadowBlur:6, shadowColor:'rgba(0,0,0,.08)'}},
+        {type:'polyline', shape:{points:[[22,10],[14,18],[22,26]]}, style:{stroke:stroke, lineWidth:3, lineCap:'round', lineJoin:'round'}}
+      ]
+    }];
+  }
+
+  const cache = new Map();
+  const cacheKey = (...parts)=>parts.join("|");
+
+  const nav = [];
+  function navSet(level, state){ nav.length = level; nav[level-1]=state; }
+  function navGet(level){ return nav[level-1] || null; }
+  function currentLevel(){ return nav.length ? (nav[nav.length-1].level || nav.length) : 1; }
+
+  async function initMeta(){
+    const info = await jsonp(tableUrl, { f:"pjson" }, 25000);
+    const metaFields = (info.data && info.data.fields) || [];
+    metaFields.forEach(f=>{ if(f && f.name) fieldTypes[f.name] = f.type || ""; });
+
+    fields = {
+      anio : resolveFieldName(info.data, ["anio","año","year"]),
+      amb  : resolveFieldName(info.data, ["ambito","ámbito"]),
+      niv  : resolveFieldName(info.data, ["nivel"]),
+      dpto : resolveFieldName(info.data, ["dpto","departamento"]),
+      prov : resolveFieldName(info.data, ["provincia"]),
+      dist : resolveFieldName(info.data, ["distrito"]),
+      dhp  : resolveFieldName(info.data, ["deficit_habitacional_p"]),
+      dcp  : resolveFieldName(info.data, ["deficit_cuantitativo_p"]),
+      dlp  : resolveFieldName(info.data, ["deficit_cualitativo_p"]),
+      dh   : resolveFieldName(info.data, ["deficit_habitacional"]),
+      dc   : resolveFieldName(info.data, ["deficit_cuantitativo"]),
+      dl   : resolveFieldName(info.data, ["deficit_cualitativo"])
+    };
+
+    const required = ["anio","amb","niv","dpto","prov","dist","dhp","dcp","dlp","dh","dc","dl"];
+    const miss = required.filter(k => !fields[k]);
+    if(miss.length) throw new Error("Campos requeridos no hallados en la tabla (id 2): " + miss.join(", "));
+  }
+
+  // ===== query stats (avg 3 pcts + sum 3 abs) en una llamada
+  async function queryStatsAll({where, groupByField, orderByFields, timeoutMs=20000}){
+    const {dhp,dcp,dlp, dh,dc,dl} = fields;
+
+    const outStatistics = [
+      { statisticType:"avg", onStatisticField: dhp, outStatisticFieldName:"dhp_avg" },
+      { statisticType:"avg", onStatisticField: dcp, outStatisticFieldName:"dcp_avg" },
+      { statisticType:"avg", onStatisticField: dlp, outStatisticFieldName:"dlp_avg" },
+      { statisticType:"sum", onStatisticField: dh,  outStatisticFieldName:"dh_sum"  },
+      { statisticType:"sum", onStatisticField: dc,  outStatisticFieldName:"dc_sum"  },
+      { statisticType:"sum", onStatisticField: dl,  outStatisticFieldName:"dl_sum"  }
+    ];
+
+    const res = await jsonp(tableUrl + "/query", {
+      where,
+      groupByFieldsForStatistics: groupByField,
+      outStatistics: JSON.stringify(outStatistics),
+      outFields: groupByField,
+      orderByFields: orderByFields || (groupByField + " ASC"),
+      returnGeometry:"false",
+      f:"json"
+    }, timeoutMs);
+
+    return (res.data && res.data.features) ? res.data.features : [];
+  }
+
+  // =========================
+  // NIVEL 1 (líneas)
+  // =========================
+  async function loadLevel1(){
+    const ck = cacheKey("L1", ambitoSel);
+    if(cache.has(ck)){ renderLevel1(cache.get(ck)); return; }
+
+    setLoading(true);
+    const {anio, amb, niv, dhp, dcp, dlp, dh, dc, dl} = fields;
+
+    const where = `${whereEquals(niv, NIVEL_NACIONAL)} AND ${whereEquals(amb, ambitoSel)}`;
+    const outFields = [anio, dhp, dcp, dlp, dh, dc, dl].join(",");
+
+    const res = await jsonp(tableUrl + "/query", {
+      where, outFields, orderByFields: `${anio} ASC`,
+      returnGeometry:"false", f:"json"
+    }, 20000);
+
+    const feats = (res.data && res.data.features) || [];
+    if(!feats.length) throw new Error("Sin filas para NIVEL=NACIONAL y ÁMBITO=" + ambitoSel);
+
+    let rows = feats.map(f=>f.attributes).filter(r => r && r[anio]!=null).map(r => ({
+      anio: String(r[anio]),
+      dhp:  (r[dhp]==null ? null : Number(r[dhp])),
+      dcp:  (r[dcp]==null ? null : Number(r[dcp])),
+      dlp:  (r[dlp]==null ? null : Number(r[dlp])),
+      dh:   (r[dh]==null ? null : Number(r[dh])),
+      dc:   (r[dc]==null ? null : Number(r[dc])),
+      dl:   (r[dl]==null ? null : Number(r[dl]))
+    }));
+
+    // escala % si vienen 0..1
+    const s1 = inferScale(rows.map(r=>r.dhp));
+    const s2 = inferScale(rows.map(r=>r.dcp));
+    const s3 = inferScale(rows.map(r=>r.dlp));
+    rows.forEach(r=>{
+      if(r.dhp!=null) r.dhp *= s1;
+      if(r.dcp!=null) r.dcp *= s2;
+      if(r.dlp!=null) r.dlp *= s3;
+    });
+
+    // quitar años sin datos
+    rows = rows.filter(r=>{
+      const a = (r.dhp!=null && isFinite(r.dhp));
+      const b = (r.dcp!=null && isFinite(r.dcp));
+      const c = (r.dlp!=null && isFinite(r.dlp));
+      return a || b || c;
+    });
+
+    const payload = { rows };
+    cache.set(ck, payload);
+    renderLevel1(payload);
+    setLoading(false);
+  }
+
+  function renderLevel1({rows}){
+    navSet(1, { level:1 });
+
+    const years = rows.map(r=>r.anio);
+
+    const col1 = hsl(baseHSL.h, baseHSL.s, Math.max(18, baseHSL.l - 10));
+    const col2 = hsl(baseHSL.h, baseHSL.s, Math.min(85, baseHSL.l + 10));
+    const col3 = hsl(baseHSL.h, baseHSL.s, Math.min(85, baseHSL.l + 28));
+
+    function lineSeries(metricKey, color, typeLine, data){
+      const label = METRICS.find(m=>m.key===metricKey)?.pctLabel || metricKey;
+      return {
+        name: label,
+        type:'line',
+        smooth:true,
+        showSymbol:true,
+        symbol:'circle',
+        symbolSize:10,
+        lineStyle:{ width:3, color, type:typeLine },
+        itemStyle:{ color },
+        emphasis:{ focus:'series' },
+        data,
+        label:{
+          show:true, position:'top', distance:6, fontSize:12, color:'#111827',
+          triggerEvent:true,
+          formatter:(p)=> (p.value==null||isNaN(p.value)) ? '' : `${nf1.format(+p.value)}%`
+        },
+        labelLayout:{ hideOverlap:true },
+        _metricKey: metricKey,
+        _color: color
+      };
+    }
+
+    const series = [
+      lineSeries("dhp", col1, "solid",  rows.map(r=>isFinite(r.dhp)?r.dhp:null)),
+      lineSeries("dcp", col2, "dashed", rows.map(r=>isFinite(r.dcp)?r.dcp:null)),
+      lineSeries("dlp", col3, "dotted", rows.map(r=>isFinite(r.dlp)?r.dlp:null))
+    ];
+
+    const vals = series.flatMap(s=>s.data).filter(v=>v!=null && isFinite(v));
+    const min = vals.length ? Math.min(...vals) : 0;
+    const max = vals.length ? Math.max(...vals) : 10;
+    const pad = Math.max((max - min) * 0.10, 0.8);
+
+    chart.clear();
+    chart.setOption({
+      ...baseOption,
+      title: { show:false },
+      legend: { ...baseOption.legend, data: series.map(s=>s.name) },
+      xAxis: { ...baseOption.xAxis, data: years },
+      yAxis: { ...baseOption.yAxis, min: Math.floor((min - pad)*10)/10, max: Math.ceil((max + pad)*10)/10 },
+      tooltip:{
+        trigger:'axis',
+        axisPointer:{ type:'line' },
+        formatter:(params)=>{
+          const year = params?.[0]?.axisValue ?? "";
+          // buscar fila del año y armar row
+          const r = rows.find(x=>x.anio===String(year)) || {};
+          return tooltipHTML(String(year), r);
+        }
+      },
+      series,
+      graphic:[]
+    });
+
+    chart.off('click');
+    chart.on('click', (ev)=>{
+      if(ev.componentType==='series' && ev.seriesType==='line'){
+        const year = String(ev.name);
+        const optSeries = chart.getOption().series[ev.seriesIndex];
+        const metricKey = optSeries._metricKey; // dhp/dcp/dlp
+        const metricName = optSeries.name;      // label visible
+        const color = optSeries._color || BASE_HEX;
+        loadLevel2({ year, metricKey, metricName, color }).catch(showErr);
+      }
+    });
+
+    document.onkeydown = null;
+    $err.style.display='none'; $err.textContent='';
+  }
+
+  // =========================
+  // NIVEL 2 (dpto)
+  // =========================
+  async function loadLevel2({year, metricKey, metricName, color}){
+    const ck = cacheKey("L2", ambitoSel, year, metricKey);
+    if(cache.has(ck)){ renderLevel2(cache.get(ck), {year, metricKey, metricName, color}); return; }
+
+    setLoading(true);
+    const {anio, amb, niv, dpto} = fields;
+
+    const where =
+      `${yearWhere(anio, year)} AND ` +
+      `${whereEquals(amb, ambitoSel)} AND ` +
+      `UPPER(${niv})<>'${NIVEL_NACIONAL}' AND ` +
+      `${dpto} IS NOT NULL`;
+
+    // orden por métrica seleccionada
+    const orderBy = (metricKey==="dhp") ? "dhp_avg DESC" : (metricKey==="dcp") ? "dcp_avg DESC" : "dlp_avg DESC";
+
+    const feats = await queryStatsAll({
+      where,
+      groupByField: dpto,
+      orderByFields: orderBy,
+      timeoutMs: 20000
+    });
+
+    let rows = feats.map(f=>{
+      const a=f.attributes||{};
+      return {
+        name: String(a[dpto]??"").trim(),
+        dhp: (a.dhp_avg==null ? null : Number(a.dhp_avg)),
+        dcp: (a.dcp_avg==null ? null : Number(a.dcp_avg)),
+        dlp: (a.dlp_avg==null ? null : Number(a.dlp_avg)),
+        dh:  (a.dh_sum==null ? null : Number(a.dh_sum)),
+        dc:  (a.dc_sum==null ? null : Number(a.dc_sum)),
+        dl:  (a.dl_sum==null ? null : Number(a.dl_sum))
+      };
+    }).filter(r=>r.name && (r.dhp!=null || r.dcp!=null || r.dlp!=null));
+
+    if(!rows.length) throw new Error(`Sin datos por DPTO para ${metricName} — ${ambitoSel} — ${year}.`);
+
+    // escalar % (cada métrica puede venir 0..1)
+    const s1 = inferScale(rows.map(r=>r.dhp));
+    const s2 = inferScale(rows.map(r=>r.dcp));
+    const s3 = inferScale(rows.map(r=>r.dlp));
+    rows.forEach(r=>{
+      if(r.dhp!=null) r.dhp *= s1;
+      if(r.dcp!=null) r.dcp *= s2;
+      if(r.dlp!=null) r.dlp *= s3;
+    });
+
+    // ordenar por la seleccion (ya viene ordenado, pero aseguramos)
+    rows.sort((a,b)=>{
+      const va = a[metricKey]; const vb = b[metricKey];
+      return (vb??-Infinity) - (va??-Infinity);
+    });
+
+    const payload = { rows };
+    cache.set(ck, payload);
+
+    renderLevel2(payload, {year, metricKey, metricName, color});
+    setLoading(false);
+  }
+
+  function renderLevel2({rows}, {year, metricKey, metricName, color}){
+    navSet(2, { level:2, year, metricKey, metricName, color });
+
+    const x = rows.map(r=>r.name);
+    const y = rows.map(r=> (r[metricKey]!=null && isFinite(r[metricKey])) ? r[metricKey] : null );
+
+    chart.clear();
+    chart.setOption({
+      backgroundColor:'#ffffff',
+      grid:{ left:96, right:40, top:92, bottom:140, containLabel:true },
+      title:{ left:'center', top:10, text:`${metricName} — ${ambitoSel} — ${year}` },
+      legend:{ show:false },
+      tooltip:{
+        trigger:'axis',
+        axisPointer:{ type:'shadow' },
+        formatter:(params)=>{
+          const p=params && params[0]; if(!p) return '';
+          const r=rows[p.dataIndex] || {};
+          return tooltipHTML(p.axisValueLabel, r);
+        }
+      },
+      xAxis:{ type:'category', data:x, axisLabel:{ interval:0, rotate:(x.length>18?40:(x.length>12?25:0)) } },
+      yAxis:{ type:'value', name:'Porcentaje (%)', axisLabel:{ formatter:v=>nf1.format(v)+"%" }, splitLine:{show:false}, scale:true },
+      series:[{
+        name: metricName,
+        type:'bar',
+        data:y,
+        itemStyle:{ color },
+        label:{ show:true, position:'top', formatter:(p)=> (p.value==null||!isFinite(p.value)) ? '' : `${nf1.format(+p.value)}%` }
+      }],
+      animation:true,
+      animationDuration:650,
+      graphic: backGraphic(color, async ()=>{ await goBack(); })
+    });
+
+    chart.off('click');
+    chart.on('click', (ev)=>{
+      if(ev.componentType==='series' && ev.seriesType==='bar'){
+        const dptoSel = String(ev.name);
+        loadLevel3({ year, metricKey, metricName, dptoSel }).catch(showErr);
+      }
+    });
+
+    document.onkeydown = async (e)=>{ if(e.key==='Escape'){ await goBack(); } };
+    $err.style.display='none'; $err.textContent='';
+  }
+
+  // =========================
+  // NIVEL 3 (provincia)
+  // =========================
+  async function loadLevel3({year, metricKey, metricName, dptoSel}){
+    const ck = cacheKey("L3", ambitoSel, year, metricKey, dptoSel);
+    if(cache.has(ck)){ renderLevel3(cache.get(ck), {year, metricKey, metricName, dptoSel}); return; }
+
+    setLoading(true);
+    const {anio, amb, niv, dpto, prov} = fields;
+
+    const where =
+      `${yearWhere(anio, year)} AND ` +
+      `${whereEquals(amb, ambitoSel)} AND ` +
+      `UPPER(${niv})<>'${NIVEL_NACIONAL}' AND ` +
+      `${whereEquals(dpto, dptoSel)} AND ` +
+      `${prov} IS NOT NULL`;
+
+    const orderBy = (metricKey==="dhp") ? "dhp_avg DESC" : (metricKey==="dcp") ? "dcp_avg DESC" : "dlp_avg DESC";
+
+    const feats = await queryStatsAll({
+      where,
+      groupByField: prov,
+      orderByFields: orderBy,
+      timeoutMs: 20000
+    });
+
+    let rows = feats.map(f=>{
+      const a=f.attributes||{};
+      return {
+        name: String(a[prov]??"").trim(),
+        dhp: (a.dhp_avg==null ? null : Number(a.dhp_avg)),
+        dcp: (a.dcp_avg==null ? null : Number(a.dcp_avg)),
+        dlp: (a.dlp_avg==null ? null : Number(a.dlp_avg)),
+        dh:  (a.dh_sum==null ? null : Number(a.dh_sum)),
+        dc:  (a.dc_sum==null ? null : Number(a.dc_sum)),
+        dl:  (a.dl_sum==null ? null : Number(a.dl_sum))
+      };
+    }).filter(r=>r.name && (r.dhp!=null || r.dcp!=null || r.dlp!=null));
+
+    if(!rows.length) throw new Error(`Sin provincias con dato para ${dptoSel} (${metricName}, ${year}, ${ambitoSel}).`);
+
+    const s1 = inferScale(rows.map(r=>r.dhp));
+    const s2 = inferScale(rows.map(r=>r.dcp));
+    const s3 = inferScale(rows.map(r=>r.dlp));
+    rows.forEach(r=>{
+      if(r.dhp!=null) r.dhp *= s1;
+      if(r.dcp!=null) r.dcp *= s2;
+      if(r.dlp!=null) r.dlp *= s3;
+    });
+
+    rows.sort((a,b)=> (b[metricKey]??-Infinity) - (a[metricKey]??-Infinity));
+
+    const payload = { rows };
+    cache.set(ck, payload);
+
+    renderLevel3(payload, {year, metricKey, metricName, dptoSel});
+    setLoading(false);
+  }
+
+  function renderLevel3({rows}, {year, metricKey, metricName, dptoSel}){
+    navSet(3, { level:3, dptoSel });
+
+    const x = rows.map(r=>r.name);
+    const y = rows.map(r=> (r[metricKey]!=null && isFinite(r[metricKey])) ? r[metricKey] : null );
+    const col = hsl(baseHSL.h, baseHSL.s, Math.min(85, baseHSL.l + 18));
+
+    chart.clear();
+    chart.setOption({
+      backgroundColor:'#ffffff',
+      grid:{ left:96, right:40, top:92, bottom:140, containLabel:true },
+      title:{ left:'center', top:10, text:`${metricName} — ${ambitoSel} — ${year} — ${dptoSel}` },
+      legend:{ show:false },
+      tooltip:{
+        trigger:'axis',
+        axisPointer:{ type:'shadow' },
+        formatter:(params)=>{
+          const p=params && params[0]; if(!p) return '';
+          const r=rows[p.dataIndex] || {};
+          return tooltipHTML(p.axisValueLabel, r);
+        }
+      },
+      xAxis:{ type:'category', data:x, axisLabel:{ interval:0, rotate:(x.length>18?40:(x.length>12?25:0)) } },
+      yAxis:{ type:'value', name:'Porcentaje (%)', axisLabel:{ formatter:v=>nf1.format(v)+"%" }, splitLine:{show:false}, scale:true },
+      series:[{
+        name:metricName,
+        type:'bar',
+        data:y,
+        itemStyle:{ color: col },
+        label:{ show:true, position:'top', formatter:(p)=> (p.value==null||!isFinite(p.value)) ? '' : `${nf1.format(+p.value)}%` }
+      }],
+      animation:true,
+      animationDuration:650,
+      graphic: backGraphic(col, async ()=>{ await goBack(); })
+    });
+
+    chart.off('click');
+    chart.on('click', (ev)=>{
+      if(ev.componentType==='series' && ev.seriesType==='bar'){
+        const provSel = String(ev.name);
+        loadLevel4({ year, metricKey, metricName, dptoSel, provSel }).catch(showErr);
+      }
+    });
+
+    document.onkeydown = async (e)=>{ if(e.key==='Escape'){ await goBack(); } };
+    $err.style.display='none'; $err.textContent='';
+  }
+
+  // =========================
+  // NIVEL 4 (distrito)
+  // =========================
+  async function loadLevel4({year, metricKey, metricName, dptoSel, provSel}){
+    const ck = cacheKey("L4", ambitoSel, year, metricKey, dptoSel, provSel);
+    if(cache.has(ck)){ renderLevel4(cache.get(ck), {year, metricKey, metricName, dptoSel, provSel}); return; }
+
+    setLoading(true);
+    const {anio, amb, niv, dpto, prov, dist} = fields;
+
+    const where =
+      `${yearWhere(anio, year)} AND ` +
+      `${whereEquals(amb, ambitoSel)} AND ` +
+      `UPPER(${niv})<>'${NIVEL_NACIONAL}' AND ` +
+      `${whereEquals(dpto, dptoSel)} AND ` +
+      `${whereEquals(prov, provSel)} AND ` +
+      `${dist} IS NOT NULL`;
+
+    const orderBy = (metricKey==="dhp") ? "dhp_avg DESC" : (metricKey==="dcp") ? "dcp_avg DESC" : "dlp_avg DESC";
+
+    const feats = await queryStatsAll({
+      where,
+      groupByField: dist,
+      orderByFields: orderBy,
+      timeoutMs: 20000
+    });
+
+    let rows = feats.map(f=>{
+      const a=f.attributes||{};
+      return {
+        name: String(a[dist]??"").trim(),
+        dhp: (a.dhp_avg==null ? null : Number(a.dhp_avg)),
+        dcp: (a.dcp_avg==null ? null : Number(a.dcp_avg)),
+        dlp: (a.dlp_avg==null ? null : Number(a.dlp_avg)),
+        dh:  (a.dh_sum==null ? null : Number(a.dh_sum)),
+        dc:  (a.dc_sum==null ? null : Number(a.dc_sum)),
+        dl:  (a.dl_sum==null ? null : Number(a.dl_sum))
+      };
+    }).filter(r=>r.name && (r.dhp!=null || r.dcp!=null || r.dlp!=null));
+
+    if(!rows.length) throw new Error(`Sin distritos con dato para ${provSel} (${metricName}, ${year}, ${ambitoSel}).`);
+
+    const s1 = inferScale(rows.map(r=>r.dhp));
+    const s2 = inferScale(rows.map(r=>r.dcp));
+    const s3 = inferScale(rows.map(r=>r.dlp));
+    rows.forEach(r=>{
+      if(r.dhp!=null) r.dhp *= s1;
+      if(r.dcp!=null) r.dcp *= s2;
+      if(r.dlp!=null) r.dlp *= s3;
+    });
+
+    rows.sort((a,b)=> (b[metricKey]??-Infinity) - (a[metricKey]??-Infinity));
+
+    const payload = { rows };
+    cache.set(ck, payload);
+
+    renderLevel4(payload, {year, metricKey, metricName, dptoSel, provSel});
+    setLoading(false);
+  }
+
+  function renderLevel4({rows}, {year, metricKey, metricName, dptoSel, provSel}){
+    navSet(4, { level:4, provSel });
+
+    const x = rows.map(r=>r.name);
+    const y = rows.map(r=> (r[metricKey]!=null && isFinite(r[metricKey])) ? r[metricKey] : null );
+    const col = hsl(baseHSL.h, baseHSL.s, Math.min(88, baseHSL.l + 24));
+
+    chart.clear();
+    chart.setOption({
+      backgroundColor:'#ffffff',
+      grid:{ left:96, right:40, top:92, bottom:150, containLabel:true },
+      title:{ left:'center', top:10, text:`${metricName} — ${ambitoSel} — ${year} — ${dptoSel} — ${provSel}` },
+      legend:{ show:false },
+      tooltip:{
+        trigger:'axis',
+        axisPointer:{ type:'shadow' },
+        formatter:(params)=>{
+          const p=params && params[0]; if(!p) return '';
+          const r=rows[p.dataIndex] || {};
+          return tooltipHTML(p.axisValueLabel, r);
+        }
+      },
+      xAxis:{ type:'category', data:x, axisLabel:{ interval:0, rotate:(x.length>18?40:(x.length>12?25:0)) } },
+      yAxis:{ type:'value', name:'Porcentaje (%)', axisLabel:{ formatter:v=>nf1.format(v)+"%" }, splitLine:{show:false}, scale:true },
+      series:[{
+        name:metricName,
+        type:'bar',
+        data:y,
+        itemStyle:{ color: col },
+        label:{ show:true, position:'top', formatter:(p)=> (p.value==null||!isFinite(p.value)) ? '' : `${nf1.format(+p.value)}%` }
+      }],
+      animation:true,
+      animationDuration:650,
+      graphic: backGraphic(col, async ()=>{ await goBack(); })
+    });
+
+    chart.off('click');
+    chart.on('click', ()=>{});
+
+    document.onkeydown = async (e)=>{ if(e.key==='Escape'){ await goBack(); } };
+    $err.style.display='none'; $err.textContent='';
+  }
+
+  async function goBack(){
+    const lvl = currentLevel();
+
+    if(lvl <= 1){
+      navSet(1, {level:1});
+      await loadLevel1();
+      return;
+    }
+    if(lvl === 2){
+      navSet(1, {level:1});
+      await loadLevel1();
+      return;
+    }
+    if(lvl === 3){
+      const st2 = navGet(2);
+      if(!st2){ navSet(1,{level:1}); await loadLevel1(); return; }
+      nav.length = 2;
+      await loadLevel2({ year: st2.year, metricKey: st2.metricKey, metricName: st2.metricName, color: st2.color });
+      return;
+    }
+    if(lvl === 4){
+      const st2 = navGet(2);
+      const st3 = navGet(3);
+      if(!st2 || !st3){ navSet(1,{level:1}); await loadLevel1(); return; }
+      nav.length = 3;
+      await loadLevel3({ year: st2.year, metricKey: st2.metricKey, metricName: st2.metricName, dptoSel: st3.dptoSel });
+      return;
+    }
+
+    navSet(1, {level:1});
+    await loadLevel1();
+  }
+
+  async function onChangeAmbito(nextAmb){
+    if(!nextAmb || nextAmb===ambitoSel) return;
+    ambitoSel = nextAmb;
+    cache.clear();
+    navSet(1, {level:1});
+    await loadLevel1();
+  }
+
+  $seg.addEventListener('click', (ev)=>{
+    const btn = ev.target && ev.target.closest && ev.target.closest('button[data-amb]');
+    if(!btn) return;
+    const nextAmb = String(btn.getAttribute('data-amb')||'').trim().toUpperCase();
+    [...$seg.querySelectorAll('button[data-amb]')].forEach(b=>b.classList.toggle('active', b===btn));
+    onChangeAmbito(nextAmb).catch(showErr);
+  });
+
+  (async function run(){
+    try{
+      setLoading(true);
+      await initMeta();
+      chart.setOption(baseOption);
+      await loadLevel1();
+      setLoading(false);
+      $err.style.display='none'; $err.textContent='';
+    }catch(e){ showErr(e); }
+  })();
+
+  window.addEventListener('error', (ev)=>{
+    showErr(ev && ev.message ? ev.message : ev);
+  }, true);
+})();
+</script>
+</body>
+</html>
