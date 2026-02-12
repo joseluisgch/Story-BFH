@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Déficit Habitacional, Cuantitativo y Cualitativo por Año</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    :root{ --bg:#ffffff; --fg:#111827; --muted:#6b7280; --card:#fafafa; --shadow:0 6px 28px rgba(0,0,0,.08); }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #wrap{max-width:1100px;margin:18px auto;padding:0 14px}
+    h1{font-weight:700;font-size:20px;margin:0 0 6px;text-align:center}
+    .sub{color:var(--muted);font-size:12px;margin:0 0 14px;text-align:center}
+    #chart{height:70vh;min-height:460px;background:var(--card);border-radius:16px;box-shadow:var(--shadow);position:relative}
+    #loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;color:#6b7280}
+    #err{margin-top:10px;color:#b91c1c;font-size:12px;white-space:pre-wrap;display:none}
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <h1>Déficit Habitacional, Cuantitativo y Cualitativo por Año</h1>
+  <p class="sub">Fuente: ENAPRES</p>
+  <div id="chart"><div id="loading">Cargando datos…</div></div>
+  <div id="err"></div>
+</div>
+
+<script>
+(function(){
+  // === SERVICIO + ID ===
+  const SERVICE  = "https://portalgis.vivienda.gob.pe/servergis/rest/services/OGEI/Mapa_Indicadores_Indice_DB/FeatureServer";
+  const TABLE_ID = 1;
+
+  const REGION_TOTAL = "NACIONAL";
+  const AMBITO_TOTAL = "TOTAL";
+
+  // ====== SERIES (indicador + d_valores) ======
+  const SERIES_CFG = [
+    { key:"IND_DEFICIT_HABIT",  name:"Déficit Habitacional",  dvals:"CON DÉFICIT HABITACIONAL",  lineType:"solid"  },
+    { key:"IND_DEFICIT_CUANTI", name:"Déficit Cuantitativo",  dvals:"CON DÉFICIT CUANTITATIVO",  lineType:"dashed" },
+    { key:"IND_DEFICIT_CUALI",  name:"Déficit Cualitativo",   dvals:"CON DÉFICIT CUALITATIVO",   lineType:"dotted" }
+  ];
+
+  // Omitir regiones
+  const OMIT_REGIONS = [
+    "Provincia de Lima 2/",
+    "Lima Provincias  3/",
+    "Lima Provincias 3/"
+  ];
+
+  const nf1 = new Intl.NumberFormat('es-PE', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+  // ==== util colores
+  const BASE_HEX = "#2F4858";
+  function hexToHsl(hex){
+    const m=hex.replace('#','');
+    const r=parseInt(m.slice(0,2),16)/255, g=parseInt(m.slice(2,4),16)/255, b=parseInt(m.slice(4,6),16)/255;
+    const max=Math.max(r,g,b), min=Math.min(r,g,b); let h,s,l=(max+min)/2;
+    if(max===min){h=s=0;}
+    else{
+      const d=max-min; s=l>0.5? d/(2-max-min) : d/(max+min);
+      switch(max){case r:h=(g-b)/d+(g<b?6:0);break;case g:h=(b-r)/d+2;break;case b:h=(r-g)/d+4;break;}
+      h/=6;
+    }
+    return {h:Math.round(h*360), s:Math.round(s*100), l:Math.round(l*100)};
+  }
+  const baseHSL = hexToHsl(BASE_HEX);
+  const hsl = (h,s,l,a=1)=>`hsla(${h} ${s}% ${l}% / ${a})`;
+
+  const cleanFlag = (v)=> {
+    const t = String(v==null?'':v).trim();
+    return t ? t : '';
+  };
+
+  // ==== formato recuento (valores en MILES). Mostrar SIEMPRE 1 decimal y sufijo "mil"/"millones".
+  function formatRecuento(vThousands){
+    if(vThousands == null || isNaN(vThousands)) return '';
+    const n = Number(vThousands);
+    const sign = n < 0 ? '-' : '';
+    const absT = Math.abs(n); // en miles
+    if(absT >= 1000){
+      const millions = absT / 1000; // 1000 miles = 1 millón
+      const txt = millions.toLocaleString('es-PE', { minimumFractionDigits:1, maximumFractionDigits:1 });
+      return `${sign}${txt} millones`;
+    }else{
+      const txt = absT.toLocaleString('es-PE', { minimumFractionDigits:1, maximumFractionDigits:1 });
+      return `${sign}${txt} mil`;
+    }
+  }
+
+  // ==== dom
+  const $err = document.getElementById('err');
+  const $loading = document.getElementById('loading');
+
+  // ==== helpers
+  function qs(url, params){ return url + "?" + new URLSearchParams(params).toString(); }
+  function jsonp(url, params, timeoutMs=15000){
+    return new Promise((resolve, reject)=>{
+      const cb = "__arcgis_cb_" + Math.random().toString(36).slice(2);
+      params = { ...(params||{}), callback: cb };
+      const u = qs(url, params);
+      const s = document.createElement('script');
+      let settled=false;
+      const timer = setTimeout(()=>{ if(settled) return; settled=true; cleanup(); reject(new Error("Timeout JSONP: " + u)); }, timeoutMs);
+      function cleanup(){ clearTimeout(timer); if (s.parentNode) s.parentNode.removeChild(s); try{ delete window[cb]; }catch(_){ } }
+      window[cb] = (data)=>{ if(settled) return; settled=true; cleanup(); resolve({data, url:u}); };
+      s.src = u; s.onerror = ()=>{ if(settled) return; settled=true; cleanup(); reject(new Error("Error de script JSONP: " + u)); };
+      document.head.appendChild(s);
+    });
+  }
+  function resolveFieldName(layerMeta, candidates){
+    const fields = (layerMeta && layerMeta.fields) || [];
+    const wanted = candidates.map(s => String(s).toLowerCase());
+    for(const f of fields){
+      const n = (f.name||"").toLowerCase();
+      const a = (f.alias||"").toLowerCase();
+      if (wanted.includes(n) || (a && wanted.includes(a))) return f.name;
+    }
+    return null;
+  }
+
+  function backGraphic(color, onClick){
+    const stroke = color;
+    return [{
+      type: 'group',
+      left: 10, top: 10, z: 100,
+      bounding: 'all',
+      cursor: 'pointer',
+      onclick: onClick,
+      children: [
+        {type:'circle', shape:{cx:18, cy:18, r:18}, style:{fill:'#fff', stroke:stroke, lineWidth:2, shadowBlur:6, shadowColor:'rgba(0,0,0,.08)'}},
+        {type:'polyline', shape:{points:[[22,10],[14,18],[22,26]]}, style:{stroke:stroke, lineWidth:3, lineCap:'round', lineJoin:'round'}}
+      ]
+    }];
+  }
+
+  function buildOmitRegionWhere(regionField){
+    const parts = OMIT_REGIONS
+      .filter(Boolean)
+      .map(v => `${regionField}<>'${String(v).replace(/'/g,"''")}'`);
+    return parts.length ? parts.join(" AND ") : "1=1";
+  }
+
+  // ==== chart base
+  const chart = echarts.init(document.getElementById('chart'));
+  window.addEventListener('resize', ()=>chart.resize());
+
+  const baseOption = {
+    backgroundColor: '#ffffff',
+    grid: { left: 96, right: 40, top: 68, bottom: 80, containLabel: true },
+    legend: {
+      top: 12, left: 'center', itemWidth: 18, itemHeight: 10, icon: 'roundRect',
+      textStyle: { fontSize: 12 }
+    },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line' },
+      formatter: (params)=>{
+        const opt = chart.getOption();
+        const year = params?.[0]?.axisValue ?? '';
+        const lines = [`<b>${year}</b>`];
+        (params||[]).forEach(p=>{
+          const serOpt = opt.series[p.seriesIndex] || {};
+          const flagMap = serOpt._flagByYear || {};
+          const flagSuf = flagMap[String(year)] ? String(flagMap[String(year)]) : '';
+
+          const vTxt = (p.value==null||isNaN(p.value)) ? '—' : `${nf1.format(+p.value)}%${flagSuf}`;
+
+          const recMap = serOpt._recByYear || {};
+          const rec = recMap[String(year)];
+          const recTxt = (rec==null || isNaN(rec)) ? '' : ` - ${formatRecuento(rec)}${flagSuf}`;
+
+          lines.push(`${p.marker} ${p.seriesName}: <b>${vTxt}</b>${recTxt}`);
+        });
+        return lines.join('<br/>');
+      }
+    },
+    xAxis: { type:'category', boundaryGap:true, name:'Años', nameLocation:'middle', nameGap:34, axisTick:{alignWithLabel:true}, axisLabel:{margin:14}, animation:false, data:[] },
+    yAxis: { type:'value', name:'% Déficit', axisLabel:{ formatter:v=>nf1.format(v), margin:12 }, splitLine:{show:true}, scale:true },
+    animation: true,
+    animationDuration: 1600,
+    animationDurationUpdate: 1600,
+    series: [],
+    graphic: []
+  };
+  chart.setOption(baseOption);
+
+  const tableUrl = SERVICE + "/" + TABLE_ID;
+  let fields = {};
+  let fieldTypes = {}; // name -> type
+
+  function isStringFieldByName(fieldName){
+    const t = (fieldTypes[fieldName] || "").toLowerCase();
+    return t.includes("string") || t.includes("guid");
+  }
+
+  async function initMeta(){
+    const info = await jsonp(tableUrl, { f:"pjson" }, 20000);
+
+    // mapa de tipos
+    const metaFields = (info.data && info.data.fields) || [];
+    metaFields.forEach(f=>{
+      if(f && f.name) fieldTypes[f.name] = f.type || "";
+    });
+
+    fields = {
+      anio  : resolveFieldName(info.data, ["anio"]),
+      ambito: resolveFieldName(info.data, ["ambito"]),
+      valor : resolveFieldName(info.data, ["valor_porcentaje","valor porcentaje","valor_porcentual"]),
+      region: resolveFieldName(info.data, ["region"]),
+      ind   : resolveFieldName(info.data, ["id_indicador","indicador_id"]),
+      dvals : resolveFieldName(info.data, ["d_valores","d valores","descripcion_valor"]),
+      rec   : resolveFieldName(info.data, ["valor_recuento","valor recuento","recuento","conteo"]),
+      flag  : resolveFieldName(info.data, ["flag_coef_var","flag","coef_var_flag"])
+    };
+
+    if(!fields.anio || !fields.ambito || !fields.valor || !fields.region || !fields.ind || !fields.dvals){
+      throw new Error("Campos requeridos no hallados en la tabla (id 1).");
+    }
+  }
+
+  function showErr(e){
+    $loading.style.display = 'none';
+    $err.style.display = 'block';
+    $err.textContent = "Error: " + (e && e.message ? e.message : e);
+    console.error(e);
+  }
+
+  // ========= Línea (NACIONAL, ambito=TOTAL) =========
+  async function loadLine(){
+    const {anio, ambito, valor, region, ind, dvals, rec, flag} = fields;
+
+    // (ind + d_valores) OR ...
+    const orParts = SERIES_CFG.map(s => (
+      `(UPPER(${ind})=UPPER('${s.key}') AND UPPER(${dvals})=UPPER('${s.dvals}'))`
+    ));
+    const where =
+      `UPPER(${region})='${REGION_TOTAL}' AND ` +
+      `UPPER(${ambito})=UPPER('${AMBITO_TOTAL}') AND ` +
+      `(${orParts.join(" OR ")})`;
+
+    const outFields = [anio,ind,dvals,valor,rec].concat(flag?[flag]:[]).join(",");
+
+    const res = await jsonp(tableUrl + "/query", {
+      where,
+      outFields,
+      orderByFields: `${anio} ASC, ${ind} ASC`,
+      returnGeometry: "false",
+      f: "json"
+    }, 20000);
+
+    const features = (res.data && res.data.features) || [];
+    if(!features.length) throw new Error("La consulta no devolvió filas.");
+
+    const cfgByKey = new Map(SERIES_CFG.map(s=>[String(s.key).toUpperCase(), s]));
+    const wantDvalsByKey = new Map(SERIES_CFG.map(s=>[String(s.key).toUpperCase(), String(s.dvals).toUpperCase()]));
+
+    const raw = features.map(f=>f.attributes)
+      .filter(r => r && r[anio]!=null && r[ind]!=null && r[dvals]!=null && r[valor]!=null)
+      .map(r => ({
+        anio: String(r[anio]),
+        indKey: String(r[ind]).toUpperCase().trim(),
+        dvals: String(r[dvals]).toUpperCase().trim(),
+        valor: Number(r[valor]),
+        recuento: (r[rec]!=null ? Number(r[rec]) : null), // miles
+        flag: flag ? cleanFlag(r[flag]) : ''
+      }))
+      // defensivo: quedarnos solo con los 3 ind y su d_valores esperado
+      .filter(r => cfgByKey.has(r.indKey) && r.dvals === wantDvalsByKey.get(r.indKey));
+
+    if(!raw.length) throw new Error("No se encontraron registros para los 3 indicadores y sus d_valores esperados.");
+
+    // escalar % si viene en [0,1]
+    const maxRaw = Math.max(...raw.map(r=>r.valor));
+    const scale = (maxRaw <= 1.5) ? 100 : 1;
+    raw.forEach(r => r.valor = r.valor * scale);
+
+    // agregación por (ind, anio): promedio % + suma recuento (miles) + consolidación flags
+    const agg = new Map();
+    raw.forEach(r=>{
+      const key = r.indKey + "|" + r.anio;
+      const cur = agg.get(key) || { sum:0, count:0, rec:0, flags:new Set() };
+      cur.sum += r.valor; cur.count += 1;
+      if(r.recuento!=null && !isNaN(r.recuento)) cur.rec += r.recuento; // miles
+      if(r.flag) cur.flags.add(r.flag);
+      agg.set(key, cur);
+    });
+
+    const rows = Array.from(agg.entries()).map(([key, o])=>{
+      const [indKey, an] = key.split("|");
+      return { indKey, anio: String(an), valor: o.sum / o.count, recuento: o.rec, flag: Array.from(o.flags).join('') };
+    });
+
+    // años (orden)
+    const years = Array.from(new Set(rows.map(r=>r.anio)))
+      .sort((a,b)=> Number(a)-Number(b));
+
+    // colores para 3 series
+    const n = SERIES_CFG.length;
+    const minL = Math.max(18, baseHSL.l - 10);
+    const maxL = Math.min(85, baseHSL.l + 26);
+    const stepL = (i)=> Math.round(minL + (maxL - minL) * (i/(n-1 || 1)));
+
+    const series = SERIES_CFG.map((cfg,i)=>{
+      const col = hsl(baseHSL.h, baseHSL.s, stepL(i));
+      const dataMap = new Map(rows.filter(r=>r.indKey===cfg.key.toUpperCase()).map(r=>[r.anio, r.valor]));
+      const recMap  = new Map(rows.filter(r=>r.indKey===cfg.key.toUpperCase()).map(r=>[r.anio, r.recuento]));
+      const flgMap  = new Map(rows.filter(r=>r.indKey===cfg.key.toUpperCase()).map(r=>[r.anio, r.flag]));
+      const data = years.map(y => (dataMap.has(y) ? Number(dataMap.get(y)) : null));
+
+      const recByYear = {}; years.forEach(y=>{ if(recMap.has(y)) recByYear[y] = Number(recMap.get(y)); });
+      const flagByYear= {}; years.forEach(y=>{ const fv = flgMap.get(y); if(fv) flagByYear[y] = fv; });
+
+      return {
+        name: cfg.name,
+        type: 'line',
+        smooth: true,
+        showSymbol: true,
+        symbol: 'circle',
+        symbolSize: 6,
+        lineStyle: { width: 2, color: col, type: cfg.lineType },
+        itemStyle: { color: col },
+        emphasis: { focus: 'series', scale: false },
+        clip: true,
+        data,
+        _color: col,
+        _cfgKey: cfg.key,          // para drilldown
+        _recByYear: recByYear,
+        _flagByYear: flagByYear
+      };
+    });
+
+    const vals = series.flatMap(s=>s.data).filter(v=>v!=null && isFinite(v));
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const pad = Math.max((max - min) * 0.10, 0.8);
+    const extraBottom = Math.max((max - min) * 0.03, 0.25);
+    const yMin = Math.floor((min - pad - extraBottom) * 10)/10;
+    const yMax = Math.ceil ((max + pad) * 10)/10;
+
+    chart.clear();
+    chart.setOption({
+      ...baseOption,
+      xAxis: { ...baseOption.xAxis, data: years },
+      yAxis: { ...baseOption.yAxis, min: yMin, max: yMax, name: '% Déficit' },
+      legend: { ...baseOption.legend, data: SERIES_CFG.map(s=>s.name) },
+      series,
+      graphic: []
+    });
+
+    // etiquetas tras animación
+    let labelsShown = false;
+    chart.off('finished');
+    chart.on('finished', ()=>{
+      if(labelsShown) return; labelsShown = true;
+      chart.setOption({
+        series: series.map(() => ({
+          label:{
+            show:true, position:'bottom', distance:4, fontSize:12, color:'#111827',
+            formatter:(p)=> (p.value==null||isNaN(p.value)) ? '' : `${nf1.format(+p.value)}%`
+          },
+          labelLayout:{ hideOverlap: true }
+        }))
+      });
+    });
+
+    // clic -> drilldown (por serie/indicador y año)
+    chart.off('click');
+    chart.on('click', (ev)=>{
+      if(ev.componentType==='series' && ev.seriesType==='line'){
+        const year = String(ev.name);
+        const ser  = chart.getOption().series[ev.seriesIndex] || {};
+        const indKey = ser._cfgKey;
+        const color = ser._color || '#3b82f6';
+        const displayName = ev.seriesName;
+
+        loadBars({year, indKey, displayName, color}).catch(showErr);
+      }
+    });
+  }
+
+  // ========= Barras (DRILLDOWN) =========
+  async function loadBars({year, indKey, displayName, color}){
+    const {anio, ambito, valor, region, ind, dvals, rec, flag} = fields;
+
+    const cfg = SERIES_CFG.find(s => s.key.toUpperCase() === String(indKey).toUpperCase());
+    if(!cfg) throw new Error("Serie/indicador no reconocido para drilldown.");
+
+    const yearStr = String(year);
+    const yearWhere = isStringFieldByName(anio)
+      ? `${anio}='${yearStr.replace(/'/g,"''")}'`
+      : `${anio}=${Number(yearStr)}`;
+
+    const omitWhere = buildOmitRegionWhere(region);
+
+    const where =
+      `UPPER(${ind})=UPPER('${cfg.key}') AND ` +
+      `UPPER(${dvals})=UPPER('${cfg.dvals}') AND ` +
+      `UPPER(${ambito})=UPPER('${AMBITO_TOTAL}') AND ` +
+      `${yearWhere} AND ` +
+      `UPPER(${region})<>'${REGION_TOTAL}' AND ` +
+      `${omitWhere}`;
+
+    const outFields = [region,valor,rec].concat(flag?[flag]:[]).join(",");
+
+    const res = await jsonp(tableUrl + "/query", {
+      where,
+      outFields,
+      orderByFields: `${region} ASC`,
+      returnGeometry: "false",
+      f: "json"
+    }, 20000);
+
+    const features = (res.data && res.data.features) || [];
+    if(!features.length) throw new Error(`Sin datos para ${displayName} en ${year}.`);
+
+    // Agregar por región: promedio % y suma recuento (miles) + consolidación de flags
+    const tmp = new Map();
+    features.forEach(f=>{
+      const r = f.attributes;
+      const reg = String(r[region]);
+      if (OMIT_REGIONS.includes(reg)) return;
+
+      const v   = Number(r[valor]);
+      const rc  = (r[rec]!=null ? Number(r[rec]) : null); // miles
+      const flg = flag ? cleanFlag(r[flag]) : '';
+      const it = tmp.get(reg) || { sum:0, c:0, rec:0, flags:new Set() };
+      it.sum += v; it.c += 1;
+      if(rc!=null && !isNaN(rc)) it.rec += rc; // miles
+      if(flg) it.flags.add(flg);
+      tmp.set(reg, it);
+    });
+
+    let rows = Array.from(tmp.entries()).map(([reg, o])=>({
+      region: reg,
+      valor: o.sum / o.c,
+      recuento: o.rec,                  // miles
+      flag: Array.from(o.flags).join('')
+    }));
+
+    // escalar % si viene en [0,1]
+    const maxRaw = Math.max(...rows.map(r=>r.valor));
+    const scale = (maxRaw <= 1.5) ? 100 : 1;
+    rows.forEach(r => r.valor = r.valor * scale);
+    rows.sort((a,b)=>b.valor-a.valor);
+
+    const x = rows.map(r=>r.region);
+    const y = rows.map(r=>r.valor);
+    const recs  = rows.map(r=>r.recuento);
+    const flags = rows.map(r=>r.flag||'');
+
+    chart.clear();
+    chart.setOption({
+      backgroundColor: '#ffffff',
+      grid: { left: 96, right: 40, top: 68, bottom: 80, containLabel: true },
+      legend: { show:false },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type:'shadow' },
+        formatter: (params)=>{
+          const p = params && params[0];
+          if(!p) return '';
+          const idx = p.dataIndex;
+          const flagSuf = flags[idx] ? String(flags[idx]) : '';
+          const recHere = recs[idx];
+          const recTxt = (recHere==null || isNaN(recHere)) ? '' : ` - ${formatRecuento(recHere)}${flagSuf}`;
+          const vTxt = `${nf1.format(+p.value)}%${flagSuf}`;
+          return `${p.axisValueLabel}<br><b>${vTxt}</b>${recTxt}`;
+        }
+      },
+      title: { left: 'center', top: 10, text: `${displayName} — ${year}` },
+      xAxis: { type:'category', data: x, axisLabel:{ interval:0, rotate: (x.length>18?40:(x.length>12?25:0)) } },
+      yAxis: { type:'value', name:'% Déficit', axisLabel:{ formatter:v=>nf1.format(v) }, scale:true },
+      series: [{
+        name: 'Región',
+        type: 'bar',
+        data: y,
+        itemStyle: { color: color },
+        label: { show:true, position:'top', formatter:(p)=>`${nf1.format(+p.value)}%` }
+      }],
+      animation: true,
+      animationDuration: 1200,
+      graphic: backGraphic(color, async ()=>{
+        try { await loadLine(); } catch(e){ showErr(e); }
+      })
+    });
+
+    document.onkeydown = async (e)=>{
+      if(e.key === 'Escape'){
+        document.onkeydown = null;
+        await loadLine().catch(showErr);
+      }
+    };
+  }
+
+  // ==== flujo
+  (async function run(){
+    try{
+      $loading.style.display = 'flex';
+      await initMeta();
+      await loadLine();
+      $loading.style.display = 'none';
+      $err.style.display = 'none';
+      $err.textContent = '';
+    }catch(e){ showErr(e); }
+  })();
+
+  window.addEventListener('error', (ev)=>{
+    showErr(ev && ev.message ? ev.message : ev);
+  }, true);
+})();
+</script>
+</body>
+</html>
