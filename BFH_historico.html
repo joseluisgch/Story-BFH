@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Bonos Familiares Habitacionales (BFH) — Drill Down</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #111827;
+      --muted: #6b7280;
+      --card: #fafafa;
+      --shadow: 0 6px 28px rgba(0, 0, 0, .08);
+      --primary: #1a5276;
+      --primary-light: #2e86c1;
+      --primary-pale: #aed6f1;
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial
+    }
+
+    #wrap {
+      max-width: 1200px;
+      margin: 18px auto;
+      padding: 0 14px
+    }
+
+    h1 {
+      font-weight: 700;
+      font-size: 20px;
+      margin: 0 0 4px;
+      text-align: center;
+      color: var(--primary)
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 12px;
+      margin: 0 0 14px;
+      text-align: center
+    }
+
+    #chart {
+      height: 72vh;
+      min-height: 480px;
+      background: var(--card);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden
+    }
+
+    #chartCanvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%
+    }
+
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      color: #6b7280;
+      z-index: 5;
+      pointer-events: none;
+      background: linear-gradient(to bottom, rgba(255, 255, 255, .88), rgba(255, 255, 255, .55));
+      gap: 12px
+    }
+
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid var(--primary-pale);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin .8s linear infinite
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg)
+      }
+    }
+
+    #breadcrumb {
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      flex-wrap: wrap;
+      background: rgba(255, 255, 255, .92);
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(17, 24, 39, .10);
+      border-radius: 20px;
+      padding: 5px 14px;
+      box-shadow: 0 3px 12px rgba(0, 0, 0, .07);
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+      max-width: 90%;
+    }
+
+    #breadcrumb span.crumb {
+      color: var(--primary);
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    #breadcrumb span.crumb:hover {
+      text-decoration: underline
+    }
+
+    #breadcrumb span.sep {
+      color: #d1d5db
+    }
+
+    #breadcrumb span.active {
+      color: var(--fg);
+      font-weight: 600;
+      cursor: default
+    }
+
+    #hint {
+      position: absolute;
+      bottom: 45px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      font-size: 11px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, .85);
+      padding: 4px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(17, 24, 39, .08);
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    #err {
+      margin-top: 10px;
+      color: #b91c1c;
+      font-size: 12px;
+      white-space: pre-wrap;
+      display: none;
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      padding: 10px
+    }
+
+    /* botón volver */
+    .back-btn-wrap {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 20
+    }
+
+    .back-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #fff;
+      border: 1.5px solid var(--primary);
+      color: var(--primary);
+      border-radius: 20px;
+      padding: 5px 12px;
+      font-size: 11px;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, .07);
+      transition: .15s ease;
+      font-weight: 600;
+    }
+
+    .back-btn:hover {
+      background: var(--primary);
+      color: #fff;
+      transform: translateY(-1px)
+    }
+
+    .back-btn svg {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0
+    }
+  </style>
+</head>
+
+<body>
+  <div id="wrap">
+    <div id="chart">
+      <div id="hint">Haz clic en una barra para ver por Departamento</div>
+      <div id="loading">
+        <div class="spinner"></div><span>Cargando datos…</span>
+      </div>
+      <div id="chartCanvas"></div>
+      <div id="breadcrumb"></div>
+      <div id="source-text"
+        style="position: absolute; bottom: 10px; left: 10px; font-size: 10px; color: var(--muted); z-index: 10;">Fuente:
+        FMV, 2003-2025</div>
+    </div>
+    <div id="err"></div>
+  </div>
+
+  <script>
+    (function () {
+      // ─────────────────────────────────────────────
+      // CONFIGURACIÓN
+      // ─────────────────────────────────────────────
+      const SERVICE_URL = "https://portalgis.vivienda.gob.pe/servergis/rest/services/DGPPVU/Bonos_bfh_historico/FeatureServer/1";
+
+      const COLOR_L1 = "#1a5276";   // Año
+      const COLOR_L2 = "#1f618d";   // Departamento
+      const COLOR_L3 = "#2471a3";   // Provincia
+      const COLOR_L4 = "#2e86c1";   // Distrito
+
+      const nf0 = new Intl.NumberFormat('es-PE');
+
+      // ─────────────────────────────────────────────
+      // ESTADO DE NAVEGACIÓN
+      // ─────────────────────────────────────────────
+      const nav = [];   // stack de estados por nivel
+      const cache = new Map();
+
+      // ─────────────────────────────────────────────
+      // JSONP helper (igual al ejemplo de referencia)
+      // ─────────────────────────────────────────────
+      function jsonp(url, params, timeoutMs = 20000) {
+        return new Promise((resolve, reject) => {
+          const cb = "__bfh_cb_" + Math.random().toString(36).slice(2);
+          const u = url + "?" + new URLSearchParams({ ...params, callback: cb, f: "json" });
+          const s = document.createElement('script');
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return; settled = true; cleanup();
+            reject(new Error("Timeout: " + u));
+          }, timeoutMs);
+          function cleanup() { clearTimeout(timer); s.parentNode && s.parentNode.removeChild(s); try { delete window[cb] } catch (_) { } }
+          window[cb] = (data) => { if (settled) return; settled = true; cleanup(); resolve(data); };
+          s.src = u;
+          s.onerror = () => { if (settled) return; settled = true; cleanup(); reject(new Error("Error JSONP: " + u)); };
+          document.head.appendChild(s);
+        });
+      }
+
+      // ─────────────────────────────────────────────
+      // ECharts
+      // ─────────────────────────────────────────────
+      const chart = echarts.init(document.getElementById('chartCanvas'));
+      window.addEventListener('resize', () => chart.resize());
+
+      const $loading = document.getElementById('loading');
+      const $err = document.getElementById('err');
+      const $bc = document.getElementById('breadcrumb');
+      const $hint = document.getElementById('hint');
+
+      function setLoading(on) { $loading.style.display = on ? 'flex' : 'none'; }
+      function showErr(e) {
+        setLoading(false);
+        $err.style.display = 'block';
+        $err.textContent = "Error: " + (e && e.message ? e.message : String(e));
+        console.error(e);
+      }
+
+      // ─────────────────────────────────────────────
+      // BREADCRUMB
+      // ─────────────────────────────────────────────
+      function renderBreadcrumb() {
+        const labels = ["PERÚ"];
+        const actions = [() => { nav.length = 0; loadLevel1().catch(showErr); }];
+
+        if (nav.length >= 2) { labels.push(nav[1].anio); actions.push(() => { nav.length = 1; loadLevel2(nav[1]).catch(showErr); }); }
+        if (nav.length >= 3) { labels.push(nav[2].dpto); actions.push(() => { nav.length = 2; loadLevel3(nav[2]).catch(showErr); }); }
+        if (nav.length >= 4) { labels.push(nav[3].prov); actions.push(null); }
+
+        $bc.innerHTML = labels.map((lbl, i) => {
+          const isLast = i === labels.length - 1;
+          const sep = i > 0 ? '<span class="sep"> › </span>' : '';
+          if (isLast) return `${sep}<span class="active">${lbl}</span>`;
+          return `${sep}<span class="crumb" data-idx="${i}">${lbl}</span>`;
+        }).join('');
+
+        $bc.querySelectorAll('.crumb').forEach(el => {
+          el.addEventListener('click', () => {
+            const idx = +el.dataset.idx;
+            actions[idx] && actions[idx]();
+          });
+        });
+
+        $bc.style.display = 'flex';
+      }
+
+      // Hints por nivel
+      const HINTS = [
+        "Haz clic en una barra para ver por Departamento",
+        "Haz clic en un departamento para ver por Provincia",
+        "Haz clic en una provincia para ver por Distrito",
+        "Nivel más detallado: Distritos"
+      ];
+
+      // ─────────────────────────────────────────────
+      // QUERY helper con paginación completa
+      // ─────────────────────────────────────────────
+      async function queryGroupCount(where, groupField, orderDir = "DESC") {
+        const outStats = JSON.stringify([{
+          statisticType: "count",
+          onStatisticField: "objectid",
+          outStatisticFieldName: "cnt"
+        }]);
+
+        const data = await jsonp(SERVICE_URL + "/query", {
+          where,
+          groupByFieldsForStatistics: groupField,
+          outStatistics: outStats,
+          outFields: groupField,
+          orderByFields: `cnt ${orderDir}`,
+          returnGeometry: "false"
+        }, 25000);
+
+        if (data.error) throw new Error(JSON.stringify(data.error));
+        return (data.features || []).map(f => ({
+          name: String(f.attributes[groupField] ?? "").trim(),
+          cnt: Number(f.attributes.cnt || 0)
+        })).filter(r => r.name && r.cnt > 0);
+      }
+
+      // ─────────────────────────────────────────────
+      // Función de barras genérica
+      // ─────────────────────────────────────────────
+      function buildBarOption({ title, xData, yData, color, labelRotate, onClickCb, showBack, backCb }) {
+        const maxVal = Math.max(...yData.filter(v => v != null));
+
+        const option = {
+          backgroundColor: '#ffffff',
+          title: {
+            left: 'center', top: 12,
+            text: title,
+            textStyle: { fontSize: 14, fontWeight: 700, color: '#111827' },
+            subtext: 'Número de Bonos Familiares Habitacionales (BFH)',
+            subtextStyle: { fontSize: 11, color: '#6b7280' }
+          },
+          grid: { left: 70, right: 30, top: 80, bottom: (labelRotate > 0 ? 130 : 90), containLabel: true },
+          tooltip: {
+            trigger: 'axis',
+            axisPointer: { type: 'shadow' },
+            formatter: (params) => {
+              const p = params[0]; if (!p) return '';
+              return `<b>${p.axisValueLabel}</b><br/>Bonos: <b>${nf0.format(p.value)}</b>`;
+            }
+          },
+          xAxis: {
+            type: 'category',
+            data: xData,
+            axisLabel: { interval: 0, rotate: labelRotate, fontSize: 11 },
+            axisTick: { alignWithLabel: true }
+          },
+          yAxis: {
+            type: 'value',
+            name: 'N° de Bonos',
+            nameTextStyle: { fontSize: 11, color: '#6b7280' },
+            axisLabel: { formatter: v => nf0.format(v), fontSize: 10 },
+            splitLine: { lineStyle: { color: '#f0f0f0' } }
+          },
+          series: [{
+            type: 'bar',
+            data: yData,
+            itemStyle: {
+              color: {
+                type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                colorStops: [
+                  { offset: 0, color: color },
+                  { offset: 1, color: color + "88" }
+                ]
+              },
+              borderRadius: [4, 4, 0, 0]
+            },
+            emphasis: { itemStyle: { color: color, shadowBlur: 8, shadowColor: 'rgba(0,0,0,.15)' } },
+            label: {
+              show: xData.length <= 30,
+              position: 'top',
+              fontSize: 10,
+              color: '#374151',
+              formatter: (p) => p.value ? nf0.format(p.value) : ''
+            },
+            barMaxWidth: 60
+          }],
+          animation: true,
+          animationDuration: 700,
+          animationEasing: 'cubicOut',
+          graphic: showBack ? [{
+            type: 'group', left: 10, top: 10, z: 100, cursor: 'pointer',
+            onclick: backCb,
+            children: [
+              {
+                type: 'circle', shape: { cx: 18, cy: 18, r: 18 },
+                style: { fill: '#fff', stroke: color, lineWidth: 2, shadowBlur: 6, shadowColor: 'rgba(0,0,0,.1)' }
+              },
+              {
+                type: 'polyline', shape: { points: [[22, 10], [14, 18], [22, 26]] },
+                style: { stroke: color, lineWidth: 3, lineCap: 'round', lineJoin: 'round' }
+              }
+            ]
+          }] : []
+        };
+
+        chart.clear();
+        chart.setOption(option);
+        chart.off('click');
+        if (onClickCb) {
+          chart.on('click', ev => {
+            if (ev.componentType === 'series' && ev.seriesType === 'bar') {
+              onClickCb(ev.name, ev.dataIndex);
+            }
+          });
+        }
+        document.onkeydown = showBack
+          ? (e => { if (e.key === 'Escape') backCb(); })
+          : null;
+      }
+
+      // ─────────────────────────────────────────────
+      // NIVEL 1 — Por Año
+      // ─────────────────────────────────────────────
+      async function loadLevel1() {
+        const ck = "L1";
+        setLoading(true);
+        $hint.textContent = HINTS[0];
+
+        let rows;
+        if (cache.has(ck)) {
+          rows = cache.get(ck);
+        } else {
+          const data = await queryGroupCount("anio IS NOT NULL AND anio >= 2003 AND anio <= 2025", "anio", "ASC");
+          // ordenar cronológico
+          rows = data.sort((a, b) => Number(a.name) - Number(b.name));
+          cache.set(ck, rows);
+        }
+
+        nav.length = 1;
+        nav[0] = { level: 1 };
+
+        buildBarOption({
+          title: "Bonos BFH Desembolsados por Año",
+          xData: rows.map(r => r.name),
+          yData: rows.map(r => r.cnt),
+          color: COLOR_L1,
+          labelRotate: 0,
+          showBack: false,
+          onClickCb: (anio) => {
+            nav[1] = { level: 2, anio };
+            loadLevel2({ anio }).catch(showErr);
+          }
+        });
+
+        renderBreadcrumb();
+        setLoading(false);
+        $err.style.display = 'none';
+      }
+
+      // ─────────────────────────────────────────────
+      // NIVEL 2 — Por Departamento (filtrado por Año)
+      // ─────────────────────────────────────────────
+      async function loadLevel2({ anio }) {
+        const ck = `L2|${anio}`;
+        setLoading(true);
+        $hint.textContent = HINTS[1];
+
+        let rows;
+        if (cache.has(ck)) {
+          rows = cache.get(ck);
+        } else {
+          const where = `anio=${Number(anio)} AND departamento IS NOT NULL`;
+          rows = await queryGroupCount(where, "departamento", "DESC");
+          cache.set(ck, rows);
+        }
+
+        if (!rows.length) throw new Error(`Sin datos de departamento para el año ${anio}`);
+
+        nav.length = 2;
+        nav[1] = { level: 2, anio };
+
+        buildBarOption({
+          title: `Bonos BFH por Departamento — ${anio}`,
+          xData: rows.map(r => r.name),
+          yData: rows.map(r => r.cnt),
+          color: COLOR_L2,
+          labelRotate: rows.length > 15 ? 35 : 0,
+          showBack: true,
+          backCb: () => { nav.length = 1; loadLevel1().catch(showErr); },
+          onClickCb: (dpto) => {
+            nav[2] = { level: 3, anio, dpto };
+            loadLevel3({ anio, dpto }).catch(showErr);
+          }
+        });
+
+        renderBreadcrumb();
+        setLoading(false);
+        $err.style.display = 'none';
+      }
+
+      // ─────────────────────────────────────────────
+      // NIVEL 3 — Por Provincia
+      // ─────────────────────────────────────────────
+      async function loadLevel3({ anio, dpto }) {
+        const ck = `L3|${anio}|${dpto}`;
+        setLoading(true);
+        $hint.textContent = HINTS[2];
+
+        let rows;
+        if (cache.has(ck)) {
+          rows = cache.get(ck);
+        } else {
+          const dptoEsc = String(dpto).replace(/'/g, "''");
+          const where = `anio=${Number(anio)} AND UPPER(departamento)=UPPER('${dptoEsc}') AND provincia IS NOT NULL`;
+          rows = await queryGroupCount(where, "provincia", "DESC");
+          cache.set(ck, rows);
+        }
+
+        if (!rows.length) throw new Error(`Sin datos de provincia para ${dpto} — ${anio}`);
+
+        nav.length = 3;
+        nav[2] = { level: 3, anio, dpto };
+
+        buildBarOption({
+          title: `Bonos BFH por Provincia — ${anio} — ${dpto}`,
+          xData: rows.map(r => r.name),
+          yData: rows.map(r => r.cnt),
+          color: COLOR_L3,
+          labelRotate: rows.length > 10 ? 35 : 0,
+          showBack: true,
+          backCb: () => { nav.length = 2; loadLevel2({ anio }).catch(showErr); },
+          onClickCb: (prov) => {
+            nav[3] = { level: 4, anio, dpto, prov };
+            loadLevel4({ anio, dpto, prov }).catch(showErr);
+          }
+        });
+
+        renderBreadcrumb();
+        setLoading(false);
+        $err.style.display = 'none';
+      }
+
+      // ─────────────────────────────────────────────
+      // NIVEL 4 — Por Distrito
+      // ─────────────────────────────────────────────
+      async function loadLevel4({ anio, dpto, prov }) {
+        const ck = `L4|${anio}|${dpto}|${prov}`;
+        setLoading(true);
+        $hint.textContent = HINTS[3];
+
+        let rows;
+        if (cache.has(ck)) {
+          rows = cache.get(ck);
+        } else {
+          const dptoEsc = String(dpto).replace(/'/g, "''");
+          const provEsc = String(prov).replace(/'/g, "''");
+          const where =
+            `anio=${Number(anio)} AND ` +
+            `UPPER(departamento)=UPPER('${dptoEsc}') AND ` +
+            `UPPER(provincia)=UPPER('${provEsc}') AND ` +
+            `distrito IS NOT NULL`;
+          rows = await queryGroupCount(where, "distrito", "DESC");
+          cache.set(ck, rows);
+        }
+
+        if (!rows.length) throw new Error(`Sin datos de distrito para ${prov} — ${dpto} — ${anio}`);
+
+        nav.length = 4;
+        nav[3] = { level: 4, anio, dpto, prov };
+
+        buildBarOption({
+          title: `Bonos BFH por Distrito — ${anio} — ${dpto} — ${prov}`,
+          xData: rows.map(r => r.name),
+          yData: rows.map(r => r.cnt),
+          color: COLOR_L4,
+          labelRotate: rows.length > 12 ? 40 : 0,
+          showBack: true,
+          backCb: () => { nav.length = 3; loadLevel3({ anio, dpto }).catch(showErr); },
+          onClickCb: null   // nivel hoja — sin siguiente nivel
+        });
+
+        renderBreadcrumb();
+        setLoading(false);
+        $err.style.display = 'none';
+      }
+
+      // ─────────────────────────────────────────────
+      // INICIO
+      // ─────────────────────────────────────────────
+      loadLevel1().catch(showErr);
+
+    })();
+  </script>
+</body>
+
+</html>
